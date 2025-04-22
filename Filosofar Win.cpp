@@ -6,6 +6,12 @@
 #include <cstdlib>
 #include <vector>
 #include <tchar.h>
+//para pasar a las funciones de semaforos
+#define SEMTENIZ 1
+#define SEMTEDER 2
+#define SEMANTESALA 3
+#define SEMMEMCSITIOS 4
+//faltan mas a definir
 //Definiciones de las Funciones 
 typedef int(__cdecl* TFI2_inicio)(int, unsigned long long, struct DatosSimulaciOn*, int const*);
 typedef int(__cdecl* TFI2_inicioFilOsofo)(int);
@@ -38,17 +44,44 @@ TFI2_finFilOsofo FI2_finFilOsofo;
 TFI2_fin FI2_fin;
 Tpon_error pon_error;
 TFI2_aDondeVoySiAndo FI2_aDondeVoySiAndo;
-//Declaracion de cosas para eliminar la semiespera
-HANDLE hMapeo;
-int* permitidoAndar;
-HANDLE semPersonal[MAXFILOSOFOS];
-HANDLE semMEMC;
+
 //Declaracion el Struct con los parametros
 typedef struct param{
     int numF, numV, vel;
     unsigned long long clave = 28545168465992;
 }Parametros;
 Parametros parametrosGlob = { 0 };
+//esto al hacer un struct es como un POO de Java, asi todo lo del puente lo tengo aqui
+typedef struct puente{
+    HANDLE hsem = nullptr;
+    LONG aforo = LONG_MAX;
+    //Crear el semaforo con el aforo de la dss
+    bool iniciarSem(int aforoM) 
+    {
+        if (aforoM > 0)
+        {
+            aforo = aforoM;
+        }
+        hsem = CreateSemaphore(nullptr, aforo, aforo, TEXT("SemPuente"));
+        if (!hsem)
+        {
+            std::cerr << "[!]\t Error en la creacion de SemPuente";
+            return false;
+        }
+        return true;
+    }
+    //elimiar
+    void eliminarSem() 
+    {
+        if (hsem)
+        {
+            CloseHandle(hsem);
+            hsem = nullptr;
+        }
+    }
+    //falta decremntar aumentar y comprobar cosas
+}puente;
+puente P;
 
 //Carga de la DLL
 HMODULE cargarDLL() {
@@ -115,100 +148,115 @@ int cargarFunciones(HMODULE dll) {
         return 0;
     }
 }
+static HANDLE* sems = NULL;
+static int semCont = 0;
+//funcion para crear un array de semaforos, lo unico que todos con los mismos huecos y estados iniciales
+bool crearSems(int cont, LONG ini, LONG max) {
+    sems = (HANDLE*)malloc(sizeof(HANDLE) * cont);
+    if (!sems)
+    {
+        return false;
+    }
+    semCont = cont;
+    for (int i = 0; i < semCont; i++)
+    {
+        sems[i] = CreateSemaphore(NULL, ini, max, NULL);
+        if (!sems[i])
+        {
+            return false;
+            //error
+        }
+    }
+    return true;
+}
+//le pasas cuantos signal quieres hacer en un semaforo y que semaforo
+bool levantarSem(int cuantas, int semId) {
+    if (!ReleaseSemaphore(sems[semId],cuantas,NULL))
+    {
+        return false;
+    }
+    return true;
+}
+// le pasas cuantos waits quieres hacer y que semaforo
+bool bloquearSem(int cuantas, int semId) {
+    DWORD res;
+    for (int i = 0; i < cuantas; i++)
+    {
+        res = WaitForSingleObject(sems[semId], INFINITE);
+        if (res != WAIT_OBJECT_0)
+        {
+            //he intentado decrementar mas de la cuenta, se supone que esto no tiene que fallar ya que somos nosotros los que le pasamos los parametros
+        }
+    }
+    return true;
+}
+//Funcion que evita la semiespera
+//No se que hacer
+int esperaYanda(int id) {
+   
+    int x,y;
+    while(1){
+        FI2_pausaAndar();
+        if (FI2_puedoAndar()==100)
+        {
+            if (FI2_aDondeVoySiAndo(&x,&y)!=0)
+            {
+                return -1;
+            }
+            return FI2_andar();
+        }
+        Sleep(0);
+    }
+}
 //Funcion del HILO ( filosofo )
 DWORD WINAPI hiloF(LPVOID lpParam){
     int id = (int)(intptr_t)lpParam;
     FI2_inicioFilOsofo(id);
-    for (int vuelta = 0; vuelta < parametrosGlob.numV; vuelta++)
+    int zona=-1,zonaAnt=-1, vueltas=0,temp;
+    while(vueltas < parametrosGlob.numV)
     {
-        FI2_pausaAndar();
-        if (FI2_puedoAndar()==100)
-        {
-            WaitForSingleObject(semMEMC, INFINITE);
-            permitidoAndar[id] = 1;
-            ReleaseSemaphore(semMEMC, 1, NULL);
-            ReleaseSemaphore(semPersonal[id], 1, NULL);
-        }
-        while (true) {
-            WaitForSingleObject(semMEMC,INFINITE);
-
-            if (permitidoAndar[id]==1)
+       
+        zonaAnt = zona;
+        zona = esperaYanda(id);
+        switch (zona) {
+        case ENTRADACOMEDOR:
+            if (zonaAnt == ANTESALA)
             {
-                permitidoAndar[id] = 0;
-                ReleaseSemaphore(semMEMC, 1, NULL);
-                break;
+                FI2_entrarAlComedor(id);
             }
-            ReleaseSemaphore(semMEMC, 1, NULL);
-            WaitForSingleObject(semPersonal[id], INFINITE);
-        }
-        FI2_andar();
+            break;
+        case SILLACOMEDOR:
+            FI2_cogerTenedor(TENEDORIZQUIERDO);
+            FI2_cogerTenedor(TENEDORDERECHO);
+            while(FI2_comer()==SILLACOMEDOR);
+            FI2_dejarTenedor(TENEDORIZQUIERDO);
+            FI2_dejarTenedor(TENEDORDERECHO);
+            break;
+        case SALIDACOMEDOR:
+            
+            break;
+        case TEMPLO:
+            if (zonaAnt == CAMPO)
+            {
+                FI2_entrarAlTemplo(id);
+            }break;
+        case SITIOTEMPLO:       
+            while (FI2_meditar() == SITIOTEMPLO);
+            parametrosGlob.numV++;
 
+            break;
+            
+        case PUENTE:
+            //Se usan IPCS aqui
+        case CAMPO:
+        }
+        
     }
     FI2_finFilOsofo();
     return 0;
 }
-//TODO LO DE ABAJO ES PARA LA ELIMINCAION DE LA SEMIESPERA OCUPADA
-//MEM-C
-bool crearMEMC() {
-    hMapeo = CreateFileMapping(
-        INVALID_HANDLE_VALUE,
-        NULL,
-        PAGE_READWRITE,
-        0,
-        sizeof(int) * MAXFILOSOFOS,
-        TEXT("MemoriaAndar")
-    );
-    if (!hMapeo)
-    {
-        std::cerr << "[!]\t Error en la creacion de Memoria Compartida\n";
-        return false;
-    }
-    permitidoAndar = (int*)MapViewOfFile(
-        hMapeo,
-        FILE_MAP_ALL_ACCESS,
-        0, 0, 0
-    );
-    if (!permitidoAndar)
-    {
-        std::cerr << "[!]\t Error mapeando la vista de memoria\n";
-        CloseHandle(hMapeo);
-        return false;
-    }
-    for (int i = 0; i < MAXFILOSOFOS; i++)
-    {
-        permitidoAndar[i] = 0;
-    }
-    return true;
-}
-//Semaforos personales
-bool crearsemP(int numFil) {
-    for (int i = 0; i < numFil; i++)
-    {
-        semPersonal[i] = CreateSemaphore(
-            NULL,
-            0, 1,
-            NULL
-        );
-        if (!semPersonal[i])
-        {
-            std::cerr << "[!]\t Error creando el semaforo para el filosofo" << i << "\n";
-            return false;
-        }
-    }
-    return true;
-}
-//Semaforo para acceder a MEMC
-bool crearSemG() {
-    semMEMC = CreateSemaphore(
-        NULL, 1, 1, NULL
-    );
-    if (!semMEMC)
-    {
-        std::cerr << "[!]\t Error en la creacion del semaforo de MEMC.\n";
-        return false;
-    }
-    return true;
-}
+
+
 int main(int argc, char* argv[])
 {
     HMODULE dll = cargarDLL();
@@ -218,11 +266,6 @@ int main(int argc, char* argv[])
         return 1;
     }
     leerArgs(argc, argv);
-    if (!crearMEMC()|| !crearsemP(parametrosGlob.numF)||!crearSemG())
-    {
-        std::cerr << "[!]\t Error al crear un IPC.\n";
-        return 1;
-    }
     int dE[]{
         0,0,0,0,0,0,
         0,0,0,0,0,0,
@@ -230,6 +273,10 @@ int main(int argc, char* argv[])
     };
     DatosSimulaciOn dss;
     int res = FI2_inicio(parametrosGlob.vel,parametrosGlob.clave,&dss,dE);
+    if (!P.iniciarSem(dss.maxFilOsofosEnPuente))
+    {
+        return 1;
+    }
     if (res != 0)
     {
         std::cerr << "[!]\t Error al iniciar la simulacion de codigo: " << res << "\n";
@@ -238,7 +285,7 @@ int main(int argc, char* argv[])
     }
     else {
         std::vector<HANDLE>hilos;
-        for ( int i = 0; i <parametrosGlob.numF; i++)
+        for ( int i = 0; i < parametrosGlob.numF; i++)
         {
             DWORD threadId;
             HANDLE h = CreateThread(
@@ -259,6 +306,7 @@ int main(int argc, char* argv[])
         WaitForMultipleObjects(hilos.size(), hilos.data(), TRUE, INFINITE);
         for (HANDLE h : hilos)CloseHandle(h);
     }
+    P.eliminarSem();
     FI2_fin();
     FreeLibrary(dll);
     return 0;
