@@ -6,6 +6,13 @@
 #include <cstdlib>
 #include <vector>
 #include <tchar.h>
+#include <fstream>
+//cosas del puente
+#define SHM_NAME TEXT("PUENTE")
+static CRITICAL_SECTION csMemPuente;
+static CONDITION_VARIABLE cvPuenteDir;
+static CONDITION_VARIABLE cvPuenteAf;
+static int* memP = nullptr;
 //para pasar a las funciones de semaforos
 #define SEMTENIZ 1
 #define SEMTEDER 2
@@ -17,7 +24,7 @@ typedef int(__cdecl* TFI2_inicio)(int, unsigned long long, struct DatosSimulaciO
 typedef int(__cdecl* TFI2_inicioFilOsofo)(int);
 typedef int(__cdecl* TFI2_pausaAndar)(void);
 typedef int(__cdecl* TFI2_puedoAndar)(void);
-typedef int(__cdecl* TFI2_aDondeVoySiAndo)(int*, int*);
+typedef int(__cdecl* TFI2_aDOndeVoySiAndo)(int*, int*);
 typedef int(__cdecl* TFI2_andar)(void);
 typedef int(__cdecl* TFI2_entrarAlComedor)(int);
 typedef int(__cdecl* TFI2_cogerTenedor)(int);
@@ -28,7 +35,7 @@ typedef int(__cdecl* TFI2_meditar)(void);
 typedef int(__cdecl* TFI2_finFilOsofo)(void);
 typedef int(__cdecl* TFI2_fin)(void);
 typedef void(__cdecl* Tpon_error)(char*);
-//Declaracion de punteros Globales
+//Declaracion de punteros Globales 
 TFI2_inicio FI2_inicio;
 TFI2_inicioFilOsofo FI2_inicioFilOsofo;
 TFI2_pausaAndar FI2_pausaAndar;
@@ -43,7 +50,7 @@ TFI2_meditar FI2_meditar;
 TFI2_finFilOsofo FI2_finFilOsofo;
 TFI2_fin FI2_fin;
 Tpon_error pon_error;
-TFI2_aDondeVoySiAndo FI2_aDondeVoySiAndo;
+TFI2_aDOndeVoySiAndo FI2_aDOndeVoySiAndo;
 
 //Declaracion el Struct con los parametros
 typedef struct param{
@@ -79,9 +86,52 @@ typedef struct puente{
             hsem = nullptr;
         }
     }
-    //falta decremntar aumentar y comprobar cosas
+    //bloquear
+    void waitP() {
+       
+            DWORD res = WaitForSingleObject(hsem, INFINITE);
+            if (res != WAIT_OBJECT_0)
+            {
+                //error
+           }
+        
+    }
+    //desbloqueo
+    void signalP(int incremento) {
+
+            if (!ReleaseSemaphore(hsem,incremento,nullptr))
+            {
+                //error
+            }
+        
+    }
+
 }puente;
 puente P;
+//variables en MEMC del puente
+HANDLE crearVarsPuenteenMEM(LPCTSTR nombre, int **ppMem) {
+    HANDLE hmap = CreateFileMapping(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, 2 * sizeof(int), nombre);
+    if (!hmap)
+    {
+        //error
+        return NULL;
+    }
+    *ppMem = (int*)MapViewOfFile(hmap, FILE_MAP_ALL_ACCESS, 0, 0, 2 * sizeof(int));
+    if (!*ppMem)
+    {
+        //error
+        CloseHandle(hmap);
+        return NULL;
+    }
+    //cant
+    (*ppMem)[0] = 0;
+    //dir
+    (*ppMem)[1] = 0;
+    return hmap;
+}
+/*para escribir y leer en MemC
+    pShared[indx] = val;
+    pShared[indx];*/
 
 //Carga de la DLL
 HMODULE cargarDLL() {
@@ -138,10 +188,14 @@ int cargarFunciones(HMODULE dll) {
     FI2_finFilOsofo = (TFI2_finFilOsofo)GetProcAddress(dll, "FI2_finFilOsofo");
     FI2_fin = (TFI2_fin)GetProcAddress(dll, "FI2_fin");
     pon_error = (Tpon_error)GetProcAddress(dll, "pon_error");
-    FI2_aDondeVoySiAndo = (TFI2_aDondeVoySiAndo)GetProcAddress(dll, "FI2_aDondeVoySiAndo");
+    FI2_aDOndeVoySiAndo = (TFI2_aDOndeVoySiAndo)GetProcAddress(dll, "FI2_aDOndeVoySiAndo");
 
     if (!FI2_inicio || !FI2_comer || !FI2_fin) {
         std::cerr << "[!]\tError al obtener una o más funciones clave.\n";
+        return 1;
+    }
+    if (!FI2_aDOndeVoySiAndo) {
+        std::cerr << "[!]\tNo se pudo cargar FI2_aDOndeVoySiAndo: " << GetLastError() << "\n";
         return 1;
     }
     else {
@@ -192,32 +246,59 @@ bool bloquearSem(int cuantas, int semId) {
 }
 //Funcion que evita la semiespera
 //No se que hacer
-int esperaYanda(int id) {
-   
-    int x,y;
-    while(1){
-        FI2_pausaAndar();
-        if (FI2_puedoAndar()==100)
+int semiespera() {
+    while (1) {
+        if (FI2_puedoAndar() == 100)
         {
-            if (FI2_aDondeVoySiAndo(&x,&y)!=0)
-            {
-                return -1;
-            }
             return FI2_andar();
         }
         Sleep(0);
     }
 }
+
 //Funcion del HILO ( filosofo )
 DWORD WINAPI hiloF(LPVOID lpParam){
     int id = (int)(intptr_t)lpParam;
     FI2_inicioFilOsofo(id);
-    int zona=-1,zonaAnt=-1, vueltas=0,temp;
+    int zona=-1,zonaAnt=-1, vueltas=0,x,y,dir=1,flag=0;
+    bool puedoEntrarP=false,tomeSemP=false;
     while(vueltas < parametrosGlob.numV)
     {
-       
+     
+        FI2_pausaAndar();
+        FI2_aDOndeVoySiAndo(&x, &y);
+        bool ida = (dir == 1 && x == 67 && y == 8);
+        bool vuelta = (dir == -1 && x == 76 && y == 8);
+        //ESTOY EN LA ENTRADA DEL PUENTE
+        if (ida || vuelta)
+        {
+            flag = 1;
+            EnterCriticalSection(&csMemPuente);
+            //Si no tengo la direccion espero
+            while (memP[0] > 0 && memP[1] != dir) {
+                SleepConditionVariableCS(&cvPuenteDir, &csMemPuente, INFINITE);
+            }
+            //Si esta vacio fijo mi direccion
+            if (memP[0] == 0)
+            {
+                //si no hay nadie pongo al puente mi direccion
+                memP[1] = dir;
+            }
+            //Si no lo esta
+            //Si esta lleno me quedo esperando
+            while (memP[0] >= P.aforo) {
+                SleepConditionVariableCS(&cvPuenteAf, &csMemPuente, INFINITE);
+            }
+            //Entro
+            P.waitP();
+            memP[0]++;
+            LeaveCriticalSection(&csMemPuente);
+            
+            tomeSemP = true;
+        }
         zonaAnt = zona;
-        zona = esperaYanda(id);
+        zona = semiespera();
+        
         switch (zona) {
         case ENTRADACOMEDOR:
             if (zonaAnt == ANTESALA)
@@ -246,9 +327,38 @@ DWORD WINAPI hiloF(LPVOID lpParam){
 
             break;
             
-        case PUENTE:
-            //Se usan IPCS aqui
+            
+        case PUENTE: {
+
+         
+            break;
+        }
+            
         case CAMPO:
+            if (zonaAnt == PUENTE)
+            {
+                EnterCriticalSection(&csMemPuente); 
+                memP[0]--;
+                if (memP[0]==0)
+                {
+                    memP[1] = 0;
+                    WakeAllConditionVariable(&cvPuenteDir);
+                }
+                else {
+                    WakeAllConditionVariable(&cvPuenteAf);
+                }
+                LeaveCriticalSection(&csMemPuente);
+                if (tomeSemP)
+                {
+                    P.signalP(1);
+                    tomeSemP = false;
+                }
+                dir = -dir;
+                flag = 0;
+            }
+            
+            break;
+            
         }
         
     }
@@ -265,6 +375,19 @@ int main(int argc, char* argv[])
         FreeLibrary(dll);
         return 1;
     }
+    char dllPath[MAX_PATH];
+    GetModuleFileNameA(dll, dllPath, MAX_PATH);
+    std::cout << "[+] DLL realmente cargada desde: " << dllPath << std::endl;
+    memP = nullptr;
+    HANDLE hmap = crearVarsPuenteenMEM(SHM_NAME, &memP);
+    if (!hmap)
+    {
+        FreeLibrary(dll);
+        return 1;
+    }
+    InitializeCriticalSection(&csMemPuente);
+    InitializeConditionVariable(&cvPuenteDir);
+    InitializeConditionVariable(&cvPuenteAf);
     leerArgs(argc, argv);
     int dE[]{
         0,0,0,0,0,0,
@@ -307,6 +430,7 @@ int main(int argc, char* argv[])
         for (HANDLE h : hilos)CloseHandle(h);
     }
     P.eliminarSem();
+    DeleteCriticalSection(&csMemPuente);
     FI2_fin();
     FreeLibrary(dll);
     return 0;
